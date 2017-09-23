@@ -1,0 +1,72 @@
+STEP 1 : /* UPLOADING .nt FILE ON HDFS AND CONVERTING IT INTO A .TXT FILE WITH "^" AS DELIMITER */
+
+//Created a Java Map Reduce Program for conversion( To see the codes, Open JavaCodes->convert)
+
+hdfs dfs -mkdir /user/cloudera/Input
+hdfs dfs -put /home/cloudera/Data/geo-coordinates_en.nt /user/cloudera/Input
+hadoop jar /home/cloudera/JarFiles/Convert.jar convert.FileDriver /user/cloudera/Input/geo-coordinates_en.nt InputResult
+hdfs dfs -get /user/cloudera/InputResult/part-r-00000 /home/cloudera/Data/InputResult.txt
+
+STEP 2 : /* STORING InputResult.txt IN A TABLE USING HIVE */
+
+hive
+
+hive> create database navigator ;
+hive> use navigator ;
+hive> CREATE TABLE NAVIGATOR_DATA(CITY STRING,LATITUDE STRING, LONGITUDE STRING) ROW FORMAT DELIMITED FIELDS TERMINATED BY '^' ;
+hive> LOAD DATA LOCAL INPATH '/home/cloudera/Data/InputResult.txt' INTO TABLE NAVIGATOR_DATA ;
+
+Creating a User Defined Function - "part()" to find the value of partitioned index 
+Creating a User Defined Function - "distance()" to find the spherical distance between two GPS coordinates
+Creating a User Defined Function - "direction()" to find the direction of a city wrt to user's city
+
+hive> add jar /home/cloudera/JarFiles/UserFunction.jar ;
+hive> create temporary function part as 'partition.Partition' ;
+hive> create temporary function distance as 'haversine.Distance' ;
+hive> create temporary function direction as 'direction.Direction' ;
+hive> create table partition_data(city string,latitude string, longitude string) partitioned by(value string);
+hive> SET hive.exec.dynamic.partition=true; SET hive.exec.dynamic.partition.mode=nonstrict;
+hive> insert into table partition_data partition(value) select city,substr(latitude,5,length(latitude)-4),substr(longitude,6,length(longitude)-5),part(substr(longitude,6,length(longitude)-5),0) from navigator_data ;
+
+
+STEP 3 : /* CREATING A TABLE USING HIVE TO STORE DATA OF 50 CITIES(SEEDFILE) */
+
+hive> create table user_data(city string,latitude string,longitude string) row format delimited fields terminated by ',' ;
+hive> load data local inpath '/home/cloudera/Data/user.txt' into table user_data ;
+
+STEP 4 /* STORING THE FINAL OUTPUT AND CONVERTING IT INTO .TSV FORMAT */
+
+hive> CREATE TABLE FINAL_DATA(USERCITY STRING,DIRECTION STRING,CITY STRING,LATITUDE STRING,LONGITUDE STRING, DISTANCE STRING); 
+
+hive> insert into table final_data
+    >  select usercity,direction(lat2,long2,lat1,long1),city,lat1,long1,d
+    >  from(
+    >  select usercity,city,lat1,long1,lat2,long2,d
+    >  from(
+    >        select usercity,city,lat1,long1,lat2,long2,distance(lat1,long1,lat2,long2) as d,value
+    >        from (
+    >               select a.city as usercity,part(a.longitude,0) as p,part(a.longitude,-1) as pleft,part(a.longitude,1) as pright , a.latitude as lat2 , a.longitude as long2 , b.city as city , b.latitude as lat1, b.longitude as long1 , b.value as value 
+    >               from partition_data b , user_data a
+    >             )f
+    >        where value = p or value=pleft or value=pright
+    >     ) s
+    >  
+    >  where d <= 50
+    > )th ;
+
+hive> insert overwrite local directory '/home/cloudera/Data/Output'
+    > row format delimited fields terminated by '\t'
+    > select usercity,direction,substr(city,1,length(city)-1),latitude,longitude,distance from final_data order by usercity,direction,distance ; 
+
+STEP 5 : /* CONVERTING .TSV FILE TO .JSON FILE FORMAT */
+
+//Created a Java Map Reduce Program for conversion( To see the codes, Open JavaCodes->json)
+
+hdfs dfs -mkdir /user/cloudera/JsonInput
+hdfs dfs -put /home/cloudera/Data/Output/000000_0 /user/cloudera/JsonInput
+hadoop jar /home/cloudera/JarFiles/Json.jar json.JsonDriver /user/cloudera/JsonInput/000000_0 JsonOutput
+hdfs dfs -get /user/cloudera/JsonOutput/part-r-00000 /home/cloudera/Data/Output.json
+
+Open Output.json file.
+Insert "{"(without double quote) at the beginning of the file.
+Now go to the end of the file and remove the last comma(",") and now insert "}"(without double quote) at the end of the file.
